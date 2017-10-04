@@ -18,7 +18,7 @@
   },
   "autoload": {
     "psr-0": {
-      "Dataground\\BqJsonStore": "src/"
+      "Dataground\\BQJsonStore": "src/"
     }
   }
 }

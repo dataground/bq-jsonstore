@@ -105,14 +105,6 @@ class BQJsonStore
      */
     public function __construct($project, BigQueryClient $bqClient)
     {
-        if (PHP_INT_SIZE < 8) {
-            throw new ErrorException(
-              'Your systems integer size of ' .
-              (PHP_INT_SIZE * 8) . ' ' .
-              'bits is not adequate (Running on 32bits host? this is not supported)'
-            );
-        }
-
         $this->base58 = new Base58();
         $this->bqClient = $bqClient;
         $this->projectUri = $project;
@@ -249,7 +241,6 @@ class BQJsonStore
      */
     public function fetchMaxJsonValue($dataset, $table, $jsonPath)
     {
-
         if (
           $this->bqClient->dataset($dataset)->exists() &&
           $this->bqClient->dataset($dataset)->table($table)->exists()
@@ -284,9 +275,9 @@ class BQJsonStore
         }
 
         /** Get datestamp with microseconds, remove first century digit **/
-        $result = intval(substr($timestamp->get()->format('YmdHisu'), 1));
+        $result = trim(substr($timestamp->get()->format('YmdHisu'), 1),'0');
 
-        if ($result === 0) {
+        if ($result === '0') {
             throw new ErrorException('Integer value conversion error');
         }
 

@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  **/
+
 namespace Dataground\BQJsonStore;
 
 use ErrorException;
@@ -28,28 +29,7 @@ use StephenHill\Base58;
 /**
  * Class BQJsonStore
  *
- * Generic BigQuery immutable, append only storage for arbitrary versioned JSON items by unique key
- * $bqbs = new BigQueryBatchService(
- *    new BigQueryClient([
- *      'projectId' => getenv('BQ_PROJECT'),
- *      'keyFile' => json_decode(file_get_contents('mykey.json'), true)
- *  ])
- * );
- *
- * $bqbs->start('mydataset');
- * $bqbs->add('mytable', 'something-unique', ['my-fancy-thing => ['foo' => 'bar']]);
- * $bqbs->flush();
- *
- * To read latest version of data in BigQuery SQL
- *
- * SELECT *
- * FROM `mydataset.mytable` AS thetable
- * INNER JOIN (SELECT uid as cuid, max(id) as maxid FROM `topdesk.incident_*` GROUP BY uid) AS latest
- * ON thetable.uid = latest.cuid AND thetable.id = latest.maxid
- *
- * Data can be accessed in SQL using JSON_EXTRACT() and JSON_EXTRACT_SCALAR() functions
- * Check bigquery documentation for more info
- *
+ * @package Dataground\BQJsonStore
  */
 class BQJsonStore
 {
@@ -74,6 +54,11 @@ class BQJsonStore
      * @var array
      */
     private $chunks = [];
+
+    /**
+     * @var string
+     */
+    private $projectUri = '';
 
     /**
      * @var string
@@ -111,13 +96,14 @@ class BQJsonStore
     private $version = '1.0.0';
 
     /**
-     * BigQueryBatchService constructor.
+     * BQJsonStore constructor.
+     *
+     * @param string         $project  Google Cloud Platform Project id
+     * @param BigQueryClient $bqClient Google BigQuery Client
      *
      * @throws ErrorException
-     *
-     * @param BigQueryClient $bqClient
      */
-    public function __construct(BigQueryClient $bqClient)
+    public function __construct($project, BigQueryClient $bqClient)
     {
         if (PHP_INT_SIZE < 8) {
             throw new ErrorException(
@@ -129,6 +115,7 @@ class BQJsonStore
 
         $this->base58 = new Base58();
         $this->bqClient = $bqClient;
+        $this->projectUri = $project;
     }
 
     /**
@@ -215,50 +202,89 @@ class BQJsonStore
     }
 
     /**
-     * @return int
+     * Fetch a row from BQ
+     *
+     * @param $sql
+     *
+     * @return mixed
      * @throws ErrorException
-     * @throws \Google\Cloud\Core\Exception\GoogleException
-     *
-     * Get current timestamp from BigQuery cluster with microsecond precision as INT64
-     * Format does not include year century.
-     *
-     * This leaves a theoretical room until (2)922-12-31 23:59:59 (max INT64 =  9223372036854)
      */
-    private function getCurrentTimeStampAsInt64()
+    public function fetchRow($sql)
     {
-        // Get time from BigQuery cluster
+
         $queryResults = $this->bqClient->runQuery(
           '#standardSQL' . PHP_EOL .
-          'SELECT CURRENT_TIMESTAMP() as now'
+          $sql
         );
 
-        $retries = 1;
+        $retries = 0;
 
         while (!$queryResults->isComplete()) {
 
             // Backoff slowly
-            usleep(50 * $retries);
+            usleep(100 * $retries);
 
             $queryResults->reload();
 
             $retries++;
             if ($retries > 500) {
-                throw new ErrorException('Timeout while reading timestamp');
+                throw new ErrorException('Timeout during query');
             }
         }
 
         $row = $queryResults->rows()->current();
 
-        /**
-         * @var Timestamp $timestamp
-         */
+        return $row;
+    }
+
+    /**
+     * Get the maximum value of a json member element
+     * Used to determine last update date
+     *
+     * @param $dataset
+     * @param $table
+     * @param $jsonPath
+     *
+     * @return bool|string
+     */
+    public function fetchMaxJsonValue($dataset, $table, $jsonPath)
+    {
+
+        if (
+          $this->bqClient->dataset($dataset)->exists() &&
+          $this->bqClient->dataset($dataset)->table($table)->exists()
+        ) {
+            $table = $dataset . '.' . $table;
+            $sql = "SELECT MAX(JSON_EXTRACT(json, '" . $jsonPath . "')) as maxvalue FROM `" . $table . "` LIMIT 1";
+            $row = $this->fetchRow($sql);
+
+            return trim($row['maxvalue'], '"');
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * @return int
+     * @throws ErrorException
+     * @throws \Google\Cloud\Core\Exception\GoogleException
+     *
+     * Get current timestamp from BigQuery cluster with microsecond precision as INT64
+     * Format does not include the first century digit.
+     *
+     * This leaves a theoretical room until (2)922-12-31 23:59:59 (max INT64 =  9223372036854)
+     */
+    private function getCurrentTimeStampAsInt64()
+    {
+        $row = $this->fetchRow('SELECT CURRENT_TIMESTAMP() as now');
         $timestamp = $row['now'];
 
         if ($timestamp === null || !($timestamp instanceof Timestamp)) {
             throw new ErrorException('Invalid Query Result');
         }
 
-        $result = intval($timestamp->get()->format('ymdHisu'));
+        /** Get datestamp with microseconds, remove first century digit **/
+        $result = intval(substr($timestamp->get()->format('YmdHisu'), 1));
 
         if ($result === 0) {
             throw new ErrorException('Integer value conversion error');
@@ -266,6 +292,7 @@ class BQJsonStore
 
         return $result;
     }
+
 
     /**
      * @param $dataset
@@ -296,20 +323,21 @@ class BQJsonStore
      *
      * @return bool
      */
-    private function createDedupeView($table)
-    {
-
-        // @todo implement
-        // SELECT uid, parent_uid, json
-        // FROM `mrdm-internal-prod.topdesk.incident` as source
-        // INNER JOIN
-        //   (SELECT uid as cuid, max(id) as maxid
-        //    FROM `mrdm-internal-prod.topdesk.incident`
-        //    GROUP BY uid) AS latest
-        // ON source.uid = latest.cuid AND source.id = latest.maxid
-
-        return true;
-    }
+//    private function createViews($dataset, $table)
+//    {
+//        $view = $table . '_current';
+//
+//        $baseTable = $this->projectUri.'.'.$dataset . '.' . $table;
+//
+//        if (!$this->bqClient->dataset($dataset)->table($view)->exists()) {
+//            $sql = "#standardSQL" . PHP_EOL ."
+//          select uid, parent_uid, json FROM `" . $baseTable . "` as source
+//          INNER JOIN (SELECT uid as cuid, max(id) as maxid FROM `" . $baseTable . "` GROUP BY uid) AS latest
+//          ON source.uid = latest.cuid AND source.id = latest.maxid AND source.event != 'DEL'";
+//
+//            $this->bqClient->dataset($dataset)->createTable($view, ['view' => ['query' => $sql]]);
+//        }
+//    }
 
     /**
      * @param       $table
@@ -333,6 +361,26 @@ class BQJsonStore
             'version'    => $this->version,
             'json'       => $json,
             'event'      => self::EVENT_UPD
+          ]
+        ];
+
+        $this->chunks[$table . $this->partitionPostfix][] = $rec;
+    }
+
+    /**
+     * @param $table
+     * @param $uid
+     */
+    public function delete($table, $uid)
+    {
+        $rec = [
+          'data' => [
+            'uid'        => $uid,
+            'parent_uid' => null,
+            'hash'       => '',
+            'version'    => $this->version,
+            'json'       => '{}',
+            'event'      => self::EVENT_DEL
           ]
         ];
 

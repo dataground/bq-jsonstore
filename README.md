@@ -1,6 +1,6 @@
 # BigQuery JSON Store
 Generic BigQuery immutable, append only storage for arbitrary versioned JSON items by unique key.
-Turns BigQuery into a schemaless JSON datastore capable of handling huge datasets.
+Turns BigQuery into a schemaless immutable JSON datastore capable of handling huge datasets.
 
 ## Installation
 `composer install dataground/bq-jsonstore`
@@ -8,32 +8,33 @@ Turns BigQuery into a schemaless JSON datastore capable of handling huge dataset
 ## Write data
 ```php
 $bqbs = new BigQueryBatchService(
+    'myproject',
     new BigQueryClient([
       'projectId' => 'myproject',
       'keyFile' => json_decode(file_get_contents('my-gcp-key.json'), true)
   ])
- );
+);
   
 $bqbs->start('mydataset');
 $bqbs->add('mytable', 'something-unique', ['my-fancy-json-thing => ['foo' => 'bar']]);
+$bqbs->delete('mytable', 'other-unique-thing');
 $bqbs->flush();
 ```
   
-## Read data 
-To read latest version of data in BigQuery SQL
+## Read data / Access JSON attributes
+Data can be accessed in SQL using JSON_EXTRACT() and JSON_EXTRACT_SCALAR() functions. 
+Check bigquery documentation for more info.
 
-```sql
-#StandardSQL
-SELECT * FROM `mydataset.mytable` AS thetable
-INNER JOIN (SELECT uid as cuid, max(id) as maxid FROM `mydataset.mytable` GROUP BY uid) AS latest
-ON thetable.uid = latest.cuid AND thetable.id = latest.maxid
-```
-
-## Access JSON attributes
-Data can be accessed in SQL using JSON_EXTRACT() and JSON_EXTRACT_SCALAR() functions.
-Check bigquery documentation for more info!
+## Known Issues
+This approach does not support updating or deleting items (same uid's) multiple times in one revision. 
+Doing this wil lead to unexpected results. To update or delete data, use a separate revision.
 
 ## TODO
-* Autocreate [table]_current (incremental) and [table]_last (latest batch) views on dataset creation
+* Autocreate [table]_last view on dataset creation
+    * To read latest combined data use the autocreated view `[mytable]_current` (for incremental loads).
+    * To read last imported revision of data use the autocreated view `[mytable]_last` (for full loads).
+    
+* Prevent multiple uid updates per revision
+* Check revision allready exists
 * Add unittests
 * More documentation
